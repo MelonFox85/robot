@@ -1,0 +1,40 @@
+running egg_info
+creating ../build/lqr_control/lqr_control.egg-info
+writing ../build/lqr_control/lqr_control.egg-info/PKG-INFO
+writing dependency_links to ../build/lqr_control/lqr_control.egg-info/dependency_links.txt
+writing entry points to ../build/lqr_control/lqr_control.egg-info/entry_points.txt
+writing requirements to ../build/lqr_control/lqr_control.egg-info/requires.txt
+writing top-level names to ../build/lqr_control/lqr_control.egg-info/top_level.txt
+writing manifest file '../build/lqr_control/lqr_control.egg-info/SOURCES.txt'
+reading manifest file '../build/lqr_control/lqr_control.egg-info/SOURCES.txt'
+adding license file 'LICENSE'
+writing manifest file '../build/lqr_control/lqr_control.egg-info/SOURCES.txt'
+running build
+running build_py
+creating /home/airat/ros2_ws/src/build/lqr_control/build/lib/lqr_control
+copying lqr_control/lqr_action_client.py -> /home/airat/ros2_ws/src/build/lqr_control/build/lib/lqr_control
+copying lqr_control/__init__.py -> /home/airat/ros2_ws/src/build/lqr_control/build/lib/lqr_control
+copying lqr_control/lqr_action_server.py -> /home/airat/ros2_ws/src/build/lqr_control/build/lib/lqr_control
+running install
+running install_lib
+creating /home/airat/ros2_ws/src/install/lqr_control/lib/python3.10/site-packages/lqr_control
+copying /home/airat/ros2_ws/src/build/lqr_control/build/lib/lqr_control/lqr_action_client.py -> /home/airat/ros2_ws/src/install/lqr_control/lib/python3.10/site-packages/lqr_control
+copying /home/airat/ros2_ws/src/build/lqr_control/build/lib/lqr_control/__init__.py -> /home/airat/ros2_ws/src/install/lqr_control/lib/python3.10/site-packages/lqr_control
+copying /home/airat/ros2_ws/src/build/lqr_control/build/lib/lqr_control/lqr_action_server.py -> /home/airat/ros2_ws/src/install/lqr_control/lib/python3.10/site-packages/lqr_control
+byte-compiling /home/airat/ros2_ws/src/install/lqr_control/lib/python3.10/site-packages/lqr_control/lqr_action_client.py to lqr_action_client.cpython-310.pyc
+byte-compiling /home/airat/ros2_ws/src/install/lqr_control/lib/python3.10/site-packages/lqr_control/__init__.py to __init__.cpython-310.pyc
+byte-compiling /home/airat/ros2_ws/src/install/lqr_control/lib/python3.10/site-packages/lqr_control/lqr_action_server.py to lqr_action_server.cpython-310.pyc
+running install_data
+creating /home/airat/ros2_ws/src/install/lqr_control/share/ament_index/resource_index/packages
+copying resource/lqr_control -> /home/airat/ros2_ws/src/install/lqr_control/share/ament_index/resource_index/packages
+copying package.xml -> /home/airat/ros2_ws/src/install/lqr_control/share/lqr_control
+creating /home/airat/ros2_ws/src/install/lqr_control/share/lqr_control/action
+copying action/SetMotorSpeed.action -> /home/airat/ros2_ws/src/install/lqr_control/share/lqr_control/action
+creating /home/airat/ros2_ws/src/install/lqr_control/share/lqr_control/launch
+copying launch/lqr_control.launch.py -> /home/airat/ros2_ws/src/install/lqr_control/share/lqr_control/launch
+running install_egg_info
+Copying ../build/lqr_control/lqr_control.egg-info to /home/airat/ros2_ws/src/install/lqr_control/lib/python3.10/site-packages/lqr_control-0.0.0-py3.10.egg-info
+running install_scripts
+Installing lqr_client script to /home/airat/ros2_ws/src/install/lqr_control/lib/lqr_control
+Installing lqr_server script to /home/airat/ros2_ws/src/install/lqr_control/lib/lqr_control
+writing list of installed files to '/home/airat/ros2_ws/src/build/lqr_control/install.log'

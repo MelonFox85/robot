@@ -1,0 +1,38 @@
+[10.971s] Invoking command in '/home/airat/ros2_ws/src/encoders_node': PYTHONPATH=/home/airat/ros2_ws/src/build/encoders_node/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/airat/ros2_ws/src/install/encoders_node/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../build/encoders_node build --build-base /home/airat/ros2_ws/src/build/encoders_node/build install --record /home/airat/ros2_ws/src/build/encoders_node/install.log --single-version-externally-managed install_data
+[13.782s] running egg_info
+[13.989s] creating ../build/encoders_node/encoders_node.egg-info
+[13.989s] writing ../build/encoders_node/encoders_node.egg-info/PKG-INFO
+[13.994s] writing dependency_links to ../build/encoders_node/encoders_node.egg-info/dependency_links.txt
+[13.995s] writing entry points to ../build/encoders_node/encoders_node.egg-info/entry_points.txt
+[13.999s] writing requirements to ../build/encoders_node/encoders_node.egg-info/requires.txt
+[13.999s] writing top-level names to ../build/encoders_node/encoders_node.egg-info/top_level.txt
+[13.999s] writing manifest file '../build/encoders_node/encoders_node.egg-info/SOURCES.txt'
+[14.452s] reading manifest file '../build/encoders_node/encoders_node.egg-info/SOURCES.txt'
+[14.454s] adding license file 'LICENSE'
+[14.465s] writing manifest file '../build/encoders_node/encoders_node.egg-info/SOURCES.txt'
+[14.486s] running build
+[14.486s] running build_py
+[14.488s] creating /home/airat/ros2_ws/src/build/encoders_node/build/lib/encoders_node
+[14.506s] copying encoders_node/right_encoder.py -> /home/airat/ros2_ws/src/build/encoders_node/build/lib/encoders_node
+[14.515s] copying encoders_node/__init__.py -> /home/airat/ros2_ws/src/build/encoders_node/build/lib/encoders_node
+[14.516s] copying encoders_node/left_encoder.py -> /home/airat/ros2_ws/src/build/encoders_node/build/lib/encoders_node
+[14.531s] running install
+[14.568s] running install_lib
+[14.824s] creating /home/airat/ros2_ws/src/install/encoders_node/lib/python3.10/site-packages/encoders_node
+[14.825s] copying /home/airat/ros2_ws/src/build/encoders_node/build/lib/encoders_node/right_encoder.py -> /home/airat/ros2_ws/src/install/encoders_node/lib/python3.10/site-packages/encoders_node
+[14.829s] copying /home/airat/ros2_ws/src/build/encoders_node/build/lib/encoders_node/__init__.py -> /home/airat/ros2_ws/src/install/encoders_node/lib/python3.10/site-packages/encoders_node
+[14.846s] copying /home/airat/ros2_ws/src/build/encoders_node/build/lib/encoders_node/left_encoder.py -> /home/airat/ros2_ws/src/install/encoders_node/lib/python3.10/site-packages/encoders_node
+[14.866s] byte-compiling /home/airat/ros2_ws/src/install/encoders_node/lib/python3.10/site-packages/encoders_node/right_encoder.py to right_encoder.cpython-310.pyc
+[14.867s] byte-compiling /home/airat/ros2_ws/src/install/encoders_node/lib/python3.10/site-packages/encoders_node/__init__.py to __init__.cpython-310.pyc
+[14.867s] byte-compiling /home/airat/ros2_ws/src/install/encoders_node/lib/python3.10/site-packages/encoders_node/left_encoder.py to left_encoder.cpython-310.pyc
+[14.878s] running install_data
+[14.879s] creating /home/airat/ros2_ws/src/install/encoders_node/share/ament_index/resource_index/packages
+[14.879s] copying resource/encoders_node -> /home/airat/ros2_ws/src/install/encoders_node/share/ament_index/resource_index/packages
+[14.880s] copying package.xml -> /home/airat/ros2_ws/src/install/encoders_node/share/encoders_node
+[14.880s] running install_egg_info
+[15.050s] Copying ../build/encoders_node/encoders_node.egg-info to /home/airat/ros2_ws/src/install/encoders_node/lib/python3.10/site-packages/encoders_node-0.0.0-py3.10.egg-info
+[15.068s] running install_scripts
+[17.453s] Installing left_encoder script to /home/airat/ros2_ws/src/install/encoders_node/lib/encoders_node
+[17.455s] Installing right_encoder script to /home/airat/ros2_ws/src/install/encoders_node/lib/encoders_node
+[17.459s] writing list of installed files to '/home/airat/ros2_ws/src/build/encoders_node/install.log'
+[17.791s] Invoked command in '/home/airat/ros2_ws/src/encoders_node' returned '0': PYTHONPATH=/home/airat/ros2_ws/src/build/encoders_node/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/airat/ros2_ws/src/install/encoders_node/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../build/encoders_node build --build-base /home/airat/ros2_ws/src/build/encoders_node/build install --record /home/airat/ros2_ws/src/build/encoders_node/install.log --single-version-externally-managed install_data

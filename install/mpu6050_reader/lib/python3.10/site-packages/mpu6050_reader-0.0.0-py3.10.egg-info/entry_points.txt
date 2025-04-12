@@ -1,0 +1,5 @@
+[console_scripts]
+mpu6050_filter = mpu6050_reader.mpu6050_filter:main
+mpu6050_graphs = mpu6050_reader.mpu6050_graphs:main
+mpu6050_graphs_plotter = mpu6050_reader.mpu6050_graphs_plotter:main
+mpu6050_node = mpu6050_reader.mpu6050_node:main

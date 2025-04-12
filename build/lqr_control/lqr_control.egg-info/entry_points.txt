@@ -1,0 +1,3 @@
+[console_scripts]
+lqr_client = lqr_control.lqr_action_client:main
+lqr_server = lqr_control.lqr_action_server:main

@@ -1,0 +1,14 @@
+Metadata-Version: 2.2
+Name: lqr_control
+Version: 0.0.0
+Summary: Package for lqr control
+Maintainer: Airat
+Maintainer-email: 523ayrata@mail.ru
+License: Apache-2.0
+License-File: LICENSE
+Requires-Dist: setuptools
+Dynamic: license
+Dynamic: maintainer
+Dynamic: maintainer-email
+Dynamic: requires-dist
+Dynamic: summary

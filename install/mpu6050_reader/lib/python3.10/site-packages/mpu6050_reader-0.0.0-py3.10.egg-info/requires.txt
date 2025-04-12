@@ -1,0 +1,6 @@
+setuptools
+smbus2
+lgpio
+matplotlib
+numpy
+math

@@ -1,0 +1,31 @@
+running egg_info
+creating ../build/cmd_publisher/cmd_publisher.egg-info
+writing ../build/cmd_publisher/cmd_publisher.egg-info/PKG-INFO
+writing dependency_links to ../build/cmd_publisher/cmd_publisher.egg-info/dependency_links.txt
+writing entry points to ../build/cmd_publisher/cmd_publisher.egg-info/entry_points.txt
+writing requirements to ../build/cmd_publisher/cmd_publisher.egg-info/requires.txt
+writing top-level names to ../build/cmd_publisher/cmd_publisher.egg-info/top_level.txt
+writing manifest file '../build/cmd_publisher/cmd_publisher.egg-info/SOURCES.txt'
+reading manifest file '../build/cmd_publisher/cmd_publisher.egg-info/SOURCES.txt'
+writing manifest file '../build/cmd_publisher/cmd_publisher.egg-info/SOURCES.txt'
+running build
+running build_py
+creating /home/airat/ros2_ws/src/build/cmd_publisher/build/lib/cmd_publisher
+copying cmd_publisher/__init__.py -> /home/airat/ros2_ws/src/build/cmd_publisher/build/lib/cmd_publisher
+copying cmd_publisher/cmd_publisher.py -> /home/airat/ros2_ws/src/build/cmd_publisher/build/lib/cmd_publisher
+running install
+running install_lib
+creating /home/airat/ros2_ws/src/install/cmd_publisher/lib/python3.10/site-packages/cmd_publisher
+copying /home/airat/ros2_ws/src/build/cmd_publisher/build/lib/cmd_publisher/__init__.py -> /home/airat/ros2_ws/src/install/cmd_publisher/lib/python3.10/site-packages/cmd_publisher
+copying /home/airat/ros2_ws/src/build/cmd_publisher/build/lib/cmd_publisher/cmd_publisher.py -> /home/airat/ros2_ws/src/install/cmd_publisher/lib/python3.10/site-packages/cmd_publisher
+byte-compiling /home/airat/ros2_ws/src/install/cmd_publisher/lib/python3.10/site-packages/cmd_publisher/__init__.py to __init__.cpython-310.pyc
+byte-compiling /home/airat/ros2_ws/src/install/cmd_publisher/lib/python3.10/site-packages/cmd_publisher/cmd_publisher.py to cmd_publisher.cpython-310.pyc
+running install_data
+creating /home/airat/ros2_ws/src/install/cmd_publisher/share/ament_index/resource_index/packages
+copying resource/cmd_publisher -> /home/airat/ros2_ws/src/install/cmd_publisher/share/ament_index/resource_index/packages
+copying package.xml -> /home/airat/ros2_ws/src/install/cmd_publisher/share/cmd_publisher
+running install_egg_info
+Copying ../build/cmd_publisher/cmd_publisher.egg-info to /home/airat/ros2_ws/src/install/cmd_publisher/lib/python3.10/site-packages/cmd_publisher-0.0.0-py3.10.egg-info
+running install_scripts
+Installing cmd_publisher script to /home/airat/ros2_ws/src/install/cmd_publisher/lib/cmd_publisher
+writing list of installed files to '/home/airat/ros2_ws/src/build/cmd_publisher/install.log'
