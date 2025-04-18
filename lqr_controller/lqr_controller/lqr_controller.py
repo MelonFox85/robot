@@ -4,12 +4,17 @@ from std_msgs.msg import Float32, Float32MultiArray
 import numpy as np
 from scipy.linalg import solve_continuous_are
 
-
 class LQRController(Node):
+    """
+    This node receives the error state (delta) from a 'lqr_feedback' topic,
+    computes the control input through LQR, converts it into desired motor RPM,
+    then publishes these RPM commands to 'motor_rpm/left' and 'motor_rpm/right'.
+    """
+
     def __init__(self):
         super().__init__('lqr_controller')
-
-        # Subscriber for LQR feedback
+        
+        # Subscriber for LQR feedback (the delta array)
         self.feedback_subscription = self.create_subscription(
             Float32MultiArray,
             'lqr_feedback',
@@ -17,88 +22,129 @@ class LQRController(Node):
             10
         )
 
-        # Publishers for motor control signals
-        self.motor_left_publisher = self.create_publisher(Float32, 'motor/left', 10)
-        self.motor_right_publisher = self.create_publisher(Float32, 'motor/right', 10)
+        # Publishers for motor RPM signals
+        self.motor_left_rpm_publisher = self.create_publisher(Float32, 'motor_rpm/left', 10)
+        self.motor_right_rpm_publisher = self.create_publisher(Float32, 'motor_rpm/right', 10)
 
-        # Physical parameters of the robot
-        self.m = 0.035
-        self.M = 1.08
-        self.r = 0.0325
-        self.L = 0.045
-        self.i = 1.85e-5
-        self.J_p = 0.00589
-        self.J_delta = 0.00327
-        self.d = 0.026
-        self.g = 9.81
+        # Declare/Initialize Robot Physical Parameters
+        self.declare_parameters(
+            namespace='',
+            parameters=[
+                ('m', 0.034),
+                ('r', 0.065/2.0),
+                ('M', 1.14 - 2.0*0.034),  # example default
+                ('L', 0.5 * 0.119),
+                ('g', 9.81),
+            ]
+        )
+        # Additional derived or known parameters
+        self.m = self.get_parameter('m').value
+        self.r = self.get_parameter('r').value
+        self.i = 0.5 * self.m * (self.r**2)
+        self.M = self.get_parameter('M').value
+        self.L = self.get_parameter('L').value
+        self.J_p = (1.0 / 12.0) * self.M * (0.1640**2 + 0.0640**2)
+        self.d = 0.1587
+        self.J_delta = (1.0 / 12.0) * self.M * (0.1190**2 + 0.0640**2)
+        self.g = self.get_parameter('g').value
 
-        # Define state-space matrices A and B
+        # Motor constraints
+        self.Ke = 0.00103       # V/rpm
+        self.KT = 0.00984       # Nm/A
+        self.rpm_max = 366.0    # maximum rpm (no-load)
+        self.voltage_supply = 12.0
+
+        # Construct matrices, define Q & R, solve for LQR K
         self.A, self.B = self.calculate_matrices()
-
-        # Define Q and R matrices for LQR
         self.Q = np.diag([1000, 0, 0, 1000, 1000, 0])
-        self.R = np.diag([1, 1])
-
-        # Compute LQR gain matrix K
+        self.R = np.diag([1.0, 1.0])
         self.K = self.calculate_lqr_gain()
 
-    def calculate_matrices(self):
-        """Calculate dynamic matrices A and B based on robot parameters."""
-        Q_eq = self.J_p * self.M + (self.J_p + self.M * self.L**2) * (2 * self.m + 2 * self.i / self.r**2)
-        A_23 = -(self.M**2 * self.L**2 * self.g) / Q_eq
-        A_43 = self.M * self.L * self.g * (self.M + 2 * self.m + 2 * self.i / self.r**2) / Q_eq
-        B_21 = (self.J_p + self.M * self.L**2 + self.M * self.L * self.r) / (Q_eq * self.r)
-        B_41 = -(self.M * self.L / self.r + self.M + 2 * self.m + 2 * self.i / self.r**2) / Q_eq
-        B_61 = 1 / (self.r * (self.m * self.d + self.i * self.d / self.r**2 + 2 * self.J_delta / self.d))
+        self.get_logger().info(f"LQRControllerRPM Node Initialized with K:\n{self.K}")
 
-        # A matrix
+    def calculate_matrices(self):
+        """
+        Build the continuous-time state-space model for the robot.
+        Returns (A, B) system matrices.
+        """
+        Q_eq = self.J_p * self.M + (self.J_p + self.M * self.L**2) * \
+               (2.0*self.m + 2.0*self.i / self.r**2)
+
+        A_23 = -(self.M**2 * self.L**2 * self.g) / Q_eq
+        A_43 = (self.M * self.L * self.g *
+                (self.M + 2.0*self.m + 2.0*self.i / self.r**2)) / Q_eq
+
+        B_21 = (self.J_p + self.M * self.L**2 + self.M * self.L * self.r) / (Q_eq * self.r)
+        B_41 = -(self.M * self.L / self.r + self.M + 2.0*self.m + 2.0*self.i / self.r**2) / Q_eq
+        B_61 = 1.0 / (
+            self.r *
+            (self.m * self.d + self.i * self.d / self.r**2 + 2.0*self.J_delta / self.d)
+        )
+
         A = np.array([
-            [0, 1, 0, 0, 0, 0],
-            [0, 0, A_23, 0, 0, 0],
-            [0, 0, 0, 1, 0, 0],
-            [0, 0, A_43, 0, 0, 0],
-            [0, 0, 0, 0, 0, 1],
-            [0, 0, 0, 0, 0, 0]
+            [0.0,  1.0, 0.0, 0.0,  0.0, 0.0],
+            [0.0,  0.0, A_23, 0.0, 0.0, 0.0],
+            [0.0,  0.0, 0.0,  1.0,  0.0, 0.0],
+            [0.0,  0.0, A_43, 0.0,  0.0, 0.0],
+            [0.0,  0.0, 0.0,  0.0,  0.0, 1.0],
+            [0.0,  0.0, 0.0,  0.0,  0.0, 0.0]
         ])
 
-        # B matrix
+        # Scale by (self.i / self.r)
         B = (self.i / self.r) * np.array([
-            [0, 0],
-            [B_21, B_21],
-            [0, 0],
-            [B_41, B_41],
-            [0, 0],
-            [B_61, -B_61]
+            [0.0,    0.0],
+            [B_21,   B_21],
+            [0.0,    0.0],
+            [B_41,   B_41],
+            [0.0,    0.0],
+            [B_61,  -B_61]
         ])
 
         return A, B
 
     def calculate_lqr_gain(self):
-        """Calculate LQR gain matrix K using the solution to the continuous-time Riccati equation."""
+        """
+        Solve the continuous-time algebraic Riccati equation for LQR gain.
+        Returns gain matrix K.
+        """
         P = solve_continuous_are(self.A, self.B, self.Q, self.R)
         K = np.linalg.inv(self.R) @ self.B.T @ P
         return K
 
-    def feedback_callback(self, msg):
-        """Callback to process LQR feedback."""
-        delta = np.array(msg.data)
+    def feedback_callback(self, msg: Float32MultiArray):
+        """
+        Receive the error state (delta), compute LQR output, convert voltage to RPM,
+        clamp the RPM, and publish.
+        """
+        delta = np.array(msg.data, dtype=float)
 
-        # Calculate control input u using LQR
-        u = -self.K @ delta
+        u = -self.K @ delta  # 2-element control vector
+        self.get_logger().info(f"LQR raw control input (approx voltage): {u}")
 
-        # Split control input into motor speeds
-        motor_left_speed = u[0]
-        motor_right_speed = u[1]
+        # Clip voltage to ±12 V
+        left_voltage = float(np.clip(u[0], -self.voltage_supply, self.voltage_supply))
+        right_voltage = float(np.clip(u[1], -self.voltage_supply, self.voltage_supply))
 
-        # Publish motor speeds
-        motor_left_msg = Float32()
-        motor_right_msg = Float32()
+        # Convert from voltage to rpm: rpm = voltage / Ke
+        left_rpm = left_voltage / self.Ke
+        right_rpm = right_voltage / self.Ke
 
-        motor_left_msg.data = motor_left_speed
-        motor_right_msg.data = motor_right_speed
+        # Clip to ± rpm_max
+        left_rpm_clamped = float(np.clip(left_rpm, -self.rpm_max, self.rpm_max))
+        right_rpm_clamped = float(np.clip(right_rpm, -self.rpm_max, self.rpm_max))
 
-        self.motor_left_publisher.publish(motor_left_msg)
-        self.motor_right_publisher.publish(motor_right_msg)
+        # Publish
+        left_rpm_msg = Float32()
+        right_rpm_msg = Float32()
+        left_rpm_msg.data = left_rpm_clamped
+        right_rpm_msg.data = right_rpm_clamped
+
+        self.motor_left_rpm_publisher.publish(left_rpm_msg)
+        self.motor_right_rpm_publisher.publish(right_rpm_msg)
+
+        self.get_logger().info(
+            f"RPM Output -> Left: {left_rpm_clamped:.2f}, Right: {right_rpm_clamped:.2f}"
+        )
 
 
 def main(args=None):
