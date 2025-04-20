@@ -1,3 +1,0 @@
-[console_scripts]
-left_encoder = encoders_node.left_encoder:main
-right_encoder = encoders_node.right_encoder:main
