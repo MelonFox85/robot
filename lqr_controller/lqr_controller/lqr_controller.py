@@ -1,104 +1,183 @@
+#!/usr/bin/env python3
+"""
+LQR‑контроллер → PWM‑доля (‑1 … +1).
+
+Главная идея: матрица K после умножения на k_scale сразу даёт значение,
+нормированное на напряжение питания, поэтому duty меняется плавно,
+а не «залипает» на насыщении.
+"""
+
+from __future__ import annotations
+import typing as _t
+import numpy as np
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Float32, Float32MultiArray
+from std_msgs.msg import Float32MultiArray
+
+try:
+    from scipy import linalg
+except ImportError:
+    linalg = None
+
 
 class LQRController(Node):
-    """
-    This node receives a 6-element delta (error) array from 'lqr_feedback'.
-    We apply user-defined LQR gains K to compute left motor acceleration (L_accel) and
-    right motor acceleration (R_accel) in a simplified approach, then transform them
-    to motor RPM and publish to motor_rpm/left and motor_rpm/right.
-    """
+    def __init__(self) -> None:
+        super().__init__("lqr_controller")
 
-    def __init__(self):
-        super().__init__('lqr_controller')
+        # ─────────── параметры ─────────── #
+        self.declare_parameters(
+            "",
+            [
+                ("update_rate", 100.0),
+                ("voltage_supply", 12.0),
+                ("v_sat", 0.95),          # |duty| ≤ v_sat
+                ("k_scale", 0.0),         # 0 ⇒ подобрать автоматически
+                ("diagnostics", True),
 
-        # Create subscription for LQR feedback (the 6-element array)
-        self.lqr_feedback_sub = self.create_subscription(
-            Float32MultiArray,
-            'lqr_feedback',
-            self.feedback_callback,
-            10
+                # модель (для расчёта K)
+                ("wheel_radius", 0.065/2),
+                ("d", 0.1587),
+                ("m", 0.034),
+                ("M", 1.14 - 2*0.034),
+                ("L", 0.5*0.119),
+                ("g", 9.81),
+
+                # топики
+                ("feedback_topic", "lqr_feedback"),
+                ("pwm_topic", "wheel_pwm"),
+            ],
         )
+        self.diagnostics = bool(self.get_parameter("diagnostics").value)
 
-        # Publishers for motor RPM signals
-        self.left_rpm_pub = self.create_publisher(Float32, 'motor_rpm/left', 10)
-        self.right_rpm_pub = self.create_publisher(Float32, 'motor_rpm/right', 10)
+        # ─────────── LQR gain ─────────── #
+        K_volt = self._compute_K()             # вольты
+        k_scale = self.get_parameter("k_scale").value
+        if k_scale == 0.0:                     # автоподбор
+            k_scale = self._auto_scale(K_volt)
+        self.K = k_scale * K_volt              # сразу в долях питания
 
-        # Example: Hardcode or declare a parameter for user to set K
-        # K is 2x6 for [L_accel, R_accel]
-        # Default from your snippet:
-        #  [[-22.3607, -43.2739, -468.4965, -42.1292,  22.3607,   6.1385],
-        #   [-22.3607, -43.2739, -468.4965, -42.1292, -22.3607,  -6.1385]]
-        self.K = [
-            [-22.3607, -43.2739, -468.4965, -42.1292,  22.3607,   6.1385],
-            [-22.3607, -43.2739, -468.4965, -42.1292, -22.3607,  -6.1385]
-        ]
+        self._print_gain(self.K, k_scale)
 
-        # Motor limits
-        self.rpm_max = 366.0
+        # ─────────── ROS I/O ─────────── #
+        self.create_subscription(
+            Float32MultiArray,
+            self.get_parameter("feedback_topic").value,
+            self._feedback_cb, 10)
 
-        # Simple scale factor to convert "acceleration" to "rpm"
-        # The exact logic depends on your hardware. Tune as needed.
-        self.accel_to_rpm = 366.0
+        self.pwm_pub = self.create_publisher(
+            Float32MultiArray,
+            self.get_parameter("pwm_topic").value,
+            10)
 
-        self.get_logger().info("LQRController node initialized.")
+        self.get_logger().info("LQRController ready.")
 
-    def feedback_callback(self, msg):
+    # ================================================================== #
+    #                        LQR  gain  (вольты)                         #
+    # ================================================================== #
+    def _compute_K(self) -> np.ndarray:
+        if linalg is None:
+            self.get_logger().warn("SciPy not найден – K по умолчанию.")
+            return np.array(
+                [[-22.36, -43.27, -468.94, -42.14,  22.36,  6.14],
+                 [-22.36, -43.27, -468.94, -42.14, -22.36, -6.14]]
+            )
+
+        p = self.get_parameter
+        m, r, M, L, d, g = [p(x).value for x in
+                            ("m", "wheel_radius", "M", "L", "d", "g")]
+        i  = 0.5 * m * r**2
+        Jp = (1/12) * M * (0.164**2 + 0.064**2)
+        Jd = (1/12) * M * (0.119**2 + 0.064**2)
+
+        Qeq = Jp*M + (Jp + M*L**2)*(2*m + 2*i/r**2)
+        A23 = -(M**2 * L**2 * g) / Qeq
+        A43 =  (M*L*g*(M + 2*m + 2*i/r**2)) / Qeq
+        B21 = (Jp + M*L**2 + M*L*r) / (Qeq*r)
+        B41 = -(M*L/r + M + 2*m + 2*i/r**2) / Qeq
+        B61 = 1 / (r*(m*d + i*d/r**2 + 2*Jd/d))
+
+        A = np.array([[0,1,0,0,0,0],
+                      [0,0,A23,0,0,0],
+                      [0,0,0,1,0,0],
+                      [0,0,A43,0,0,0],
+                      [0,0,0,0,0,1],
+                      [0,0,0,0,0,0]])
+        B = (i/r)*np.array([[0,0],
+                            [B21,B21],
+                            [0,0],
+                            [B41,B41],
+                            [0,0],
+                            [B61,-B61]])
+
+        Q = np.diag([200,0,0,200,50,0])   # умеренные веса
+        R = np.diag([5,5])                # повысили R → мягче K
+        P = linalg.solve_continuous_are(A, B, Q, R)
+        return np.linalg.inv(R) @ (B.T @ P)
+
+    # ================================================================== #
+    #                   Автоматическое масштабирование                   #
+    # ================================================================== #
+    def _auto_scale(self, K_v: np.ndarray) -> float:
         """
-        msg.data is a 6-element array (delta):
-          [dist, lin_vel, body_tilt, body_tilt_vel, turn_angle, turn_vel]
-        We'll compute:
-            L_accel = -(K1*delta[0] + K2*delta[1] + K3*delta[2] + ...
-                        K4*delta[3] + K5*delta[4] + K6*delta[5])
-            R_accel = -(K1*delta[0] + K2*delta[1] + K3*delta[2] + ...
-                        K4*delta[3] - K5*delta[4] - K6*delta[5])
-          or more generally we've stored in self.K in a 2x6 structure.
+        Подбираем коэффициент так, чтобы при 'разумной' максимальной ошибке
+        |duty| ≈ v_sat.  Это простая грубая оценка, но работает.
         """
-        delta = msg.data
-        # Convert to 6 real values
-        if len(delta) < 6:
-            self.get_logger().error("Received insufficient data size for LQR feedback!")
+        # грубая оценка предельной ошибки (можно подстроить)
+        e_max = np.array([0.5,   # θ   ~ 0.5 рад (28°)
+                          0.0,   # θ_dot
+                          1.0,   # φ   ~ 1 рад (57°)
+                          5.0,   # φ_dot
+                          0.2,   # x   ~ 0.2 м
+                          2.0])  # x_dot
+        U_pred = np.max(np.abs(K_v @ e_max))
+        v_sat  = float(self.get_parameter("v_sat").value) \
+               * float(self.get_parameter("voltage_supply").value)
+        k_scale = v_sat / U_pred if U_pred > 1e-6 else 1.0
+        self.get_logger().info(
+            f"Auto‑scale K: |U_pred|={U_pred:.1f} V  -> k_scale={k_scale:.4f}"
+        )
+        return k_scale
+
+    # ================================================================== #
+    #                             CALLBACK                               #
+    # ================================================================== #
+    def _feedback_cb(self, msg: Float32MultiArray) -> None:
+        if len(msg.data) != 6:
+            self.get_logger().error("feedback size must be 6")
             return
 
-        # Approach: u = K * delta (2 outputs)
-        L_accel = 0.0
-        R_accel = 0.0
-        for i in range(6):
-            L_accel += self.K[0][i] * delta[i]
-            R_accel += self.K[1][i] * delta[i]
+        e = np.asarray(msg.data).reshape((6,1))
+        duty = (self.K @ e).flatten()                 # уже нормировано
+        sat  = float(self.get_parameter("v_sat").value)
+        duty = np.clip(duty, -sat, sat)
 
-        # We apply the negative sign if needed. Your snippet has the minus inside the K matrix.
-        # If you want it external, do L_accel = -L_accel, R_accel = -R_accel. Check your math:
-        # For demonstration, we assume K already includes negative sign factors.
-        # L_accel, R_accel are dimensionless in this example. Convert them to RPM:
-        left_rpm = L_accel * self.accel_to_rpm
-        right_rpm = R_accel * self.accel_to_rpm
+        if self.diagnostics:
+            self.get_logger().info(
+                f"e={np.round(e.flatten(),3)} duty=[{duty[0]:.3f},{duty[1]:.3f}]"
+            )
 
-        # Clip RPM
-        left_rpm_clamped = max(min(left_rpm, self.rpm_max), -self.rpm_max)
-        right_rpm_clamped = max(min(right_rpm, self.rpm_max), -self.rpm_max)
+        out = Float32MultiArray()
+        out.data = duty.astype(np.float32).tolist()
+        self.pwm_pub.publish(out)
 
-        # Publish results
-        l_msg = Float32()
-        r_msg = Float32()
-        l_msg.data = float(left_rpm_clamped)
-        r_msg.data = float(right_rpm_clamped)
-        self.left_rpm_pub.publish(l_msg)
-        self.right_rpm_pub.publish(r_msg)
-
-        self.get_logger().info(
-            f"LQR->  L_accel={L_accel:.2f}, R_accel={R_accel:.2f} => L_rpm={left_rpm_clamped:.2f}, R_rpm={right_rpm_clamped:.2f}"
-        )
+    # ================================================================== #
+    def _print_gain(self, K: np.ndarray, k_scale: float) -> None:
+        lines = [f"K (scaled), k_scale={k_scale:.4f}:"]
+        for r in K:
+            lines.append("  " + "  ".join(f"{v:8.3f}" for v in r))
+        self.get_logger().info("\n".join(lines))
 
 
-def main(args=None):
+# ====================================================================== #
+def main(args: _t.Sequence[str] | None = None) -> None:
     rclpy.init(args=args)
     node = LQRController()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

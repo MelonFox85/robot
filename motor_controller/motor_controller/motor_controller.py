@@ -1,161 +1,150 @@
+#!/usr/bin/env python3
+"""
+motor_controller_node.py
+────────────────────────
+Узел‑драйвер двигателей.  Подписывается на:
+
+  • /wheel_pwm               (Float32MultiArray)  – [ duty_left, duty_right ]
+  • /mpu6050/filtered_data   (Float32MultiArray)  – наклон робота / прочие данные
+
+— duty ∈ [‑1 … 1] → направление + скважность PWM.
+— Экстренный стоп, если |tilt| (первый элемент IMU‑сообщения, °) > critical_angle.
+
+Изменение по сравнению с предыдущей версией
+-------------------------------------------
+•  Теперь угол наклона берётся из msg.data[0] и уже выражен в градусах –
+   никакой конвертации через `math.degrees` не требуется.
+"""
+
+from __future__ import annotations
+
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Float32, Float32MultiArray
+from std_msgs.msg import Float32MultiArray
+
 import RPi.GPIO as GPIO
-import time
 
 
 class MotorController(Node):
-    """
-    A node that receives desired RPMs for the left and right motors, translates
-    them to PWM signals, and controls the motors through GPIO pins on a Raspberry Pi.
-    """
+    # ────────────────────────── INIT ────────────────────────── #
+    def __init__(self) -> None:
+        super().__init__("motor_controller")
 
-    def __init__(self):
-        super().__init__('motor_controller')
+        # Параметры
+        self.declare_parameters(
+            "",
+            [
+                ("critical_angle", 40.0),       # °  – порог аварийного останова
+                ("pwm_frequency",  7000),       # Гц
+                ("pwm_topic",      "wheel_pwm"),
+                ("imu_topic",      "mpu6050/filtered_data"),
+            ],
+        )
+        self.crit_angle_deg: float = self.get_parameter("critical_angle").value
+        self.emergency_stop: bool = False
 
-        # Declare critical angle parameter in case we want local checks
-        # (Not strictly necessary here if running in LQR or safety node)
-        self.declare_parameter('critical_angle', 40.0)
-        self.critical_angle = self.get_parameter('critical_angle').value
+        # Пины (BCM)
+        self.PWMA, self.AIN1, self.AIN2 = 13, 27, 17   # правый мотор
+        self.PWMB, self.BIN1, self.BIN2 = 12, 14, 4    # левый  мотор
+        self.STBY = 15
 
-        # GPIO Pin Configuration
-        self.PWMA = 13  # PWM for right motor
-        self.AIN1 = 27  # Direction 1 for right motor
-        self.AIN2 = 17  # Direction 2 for right motor
-
-        self.PWMB = 12  # PWM for left motor
-        self.BIN1 = 14  # Direction 1 for left motor
-        self.BIN2 = 4   # Direction 2 for left motor
-
-        self.STBY = 15  # Standby pin (enable motors)
-
-        # Motor constraints
-        self.max_rpm = 366
-        self.max_pwm_duty_cycle = 100.0  # 0–100%
-
-        # PWM frequency (example: 7000 Hz from the original code)
-        self.pwm_frequency = 7000
-
-        # Emergency stop
-        self.emergency_stop = False
-        self.current_body_angle = 0.0
-
-        # Setup GPIO
         GPIO.setmode(GPIO.BCM)
-        GPIO.setup([self.AIN1, self.AIN2, self.BIN1, self.BIN2, self.STBY], GPIO.OUT)
+        GPIO.setup(
+            [self.AIN1, self.AIN2, self.BIN1, self.BIN2, self.STBY], GPIO.OUT
+        )
         GPIO.setup([self.PWMA, self.PWMB], GPIO.OUT)
 
-        # Create PWM
-        self.pwm_right = GPIO.PWM(self.PWMA, self.pwm_frequency)
-        self.pwm_left = GPIO.PWM(self.PWMB, self.pwm_frequency)
-        self.pwm_right.start(0)
-        self.pwm_left.start(0)
-
-        # Enable motors
+        freq = int(self.get_parameter("pwm_frequency").value)
+        self.pwm_r = GPIO.PWM(self.PWMA, freq)
+        self.pwm_l = GPIO.PWM(self.PWMB, freq)
+        self.pwm_r.start(0)
+        self.pwm_l.start(0)
         GPIO.output(self.STBY, GPIO.HIGH)
 
-        # ROS2 Subscribers for RPM commands
-        self.left_rpm_sub = self.create_subscription(
-            Float32,
-            'motor_rpm/left',
-            self.left_rpm_callback,
-            10
-        )
-        self.right_rpm_sub = self.create_subscription(
-            Float32,
-            'motor_rpm/right',
-            self.right_rpm_callback,
-            10
-        )
-
-        # IMU-subscription can be used for final-level safety checks if needed
-        self.imu_subscription = self.create_subscription(
+        # Подписки
+        self.create_subscription(
             Float32MultiArray,
-            'mpu6050/filtered_data',
-            self.imu_callback,
-            10
+            self.get_parameter("pwm_topic").value,
+            self._wheel_pwm_cb,
+            10,
+        )
+        self.create_subscription(
+            Float32MultiArray,
+            self.get_parameter("imu_topic").value,
+            self._imu_cb,
+            10,
         )
 
-        self.get_logger().info("MotorController Node Initialized.")
+        self.get_logger().info("MotorController initialised.")
 
-    def imu_callback(self, msg: Float32MultiArray):
+    # ──────────────────── CALLBACKS ──────────────────── #
+    def _imu_cb(self, msg: Float32MultiArray) -> None:
         """
-        Monitor the body angle from the IMU for emergency stop.
-        If angle is beyond threshold, set emergency_stop.
+        Tilt‑angle (°) находится в msg.data[0].
+        Если |tilt| > critical_angle → emergency_stop.
         """
-        self.current_body_angle = msg.data[4]
-        if abs(self.current_body_angle) > self.critical_angle:
+        if not msg.data:
+            return
+
+        tilt_deg = msg.data[0]
+
+        if abs(tilt_deg) > self.crit_angle_deg:
             if not self.emergency_stop:
                 self.get_logger().warn(
-                    f"Emergency stop triggered: |angle|>{self.critical_angle} deg!"
+                    f"E‑STOP: |tilt| = {tilt_deg:.1f}°  > {self.crit_angle_deg}°"
                 )
             self.emergency_stop = True
         else:
-            # If we have recovered from the tilt
             if self.emergency_stop:
-                self.get_logger().info(
-                    "Angle within safe range again. Clearing emergency stop."
-                )
+                self.get_logger().info("Tilt normalised, E‑STOP cleared.")
             self.emergency_stop = False
 
-    def left_rpm_callback(self, msg: Float32):
-        """Callback for controlling the left motor based on RPM."""
-        if not self.emergency_stop:
-            self.set_motor_rpm(self.BIN1, self.BIN2, self.pwm_left, msg.data)
+    def _wheel_pwm_cb(self, msg: Float32MultiArray) -> None:
+        if len(msg.data) < 2:
+            self.get_logger().error("wheel_pwm must contain 2 elements.")
+            return
+
+        d_left, d_right = float(msg.data[0]), float(msg.data[1])
+
+        if self.emergency_stop:
+            self._stop(self.BIN1, self.BIN2, self.pwm_l, "left")
+            self._stop(self.AIN1, self.AIN2, self.pwm_r, "right")
+            return
+
+        self._apply(self.BIN1, self.BIN2, self.pwm_l,  d_left)
+        self._apply(self.AIN1, self.AIN2, self.pwm_r, d_right)
+
+    # ───────────── LOW‑LEVEL PWM/DIR ───────────── #
+    def _apply(self, in1: int, in2: int, pwm: GPIO.PWM, duty: float) -> None:
+        duty = max(min(duty, 1.0), -1.0)
+        if duty > 0:
+            GPIO.output(in1, GPIO.HIGH)
+            GPIO.output(in2, GPIO.LOW)
+        elif duty < 0:
+            GPIO.output(in1, GPIO.LOW)
+            GPIO.output(in2, GPIO.HIGH)
         else:
-            self.stop_motor(self.BIN1, self.BIN2, self.pwm_left, "left")
+            GPIO.output(in1, GPIO.LOW)
+            GPIO.output(in2, GPIO.LOW)
+        pwm.ChangeDutyCycle(abs(duty) * 100.0)
 
-    def right_rpm_callback(self, msg: Float32):
-        """Callback for controlling the right motor based on RPM."""
-        if not self.emergency_stop:
-            self.set_motor_rpm(self.AIN1, self.AIN2, self.pwm_right, msg.data)
-        else:
-            self.stop_motor(self.AIN1, self.AIN2, self.pwm_right, "right")
+    def _stop(self, in1: int, in2: int, pwm: GPIO.PWM, label: str) -> None:
+        GPIO.output(in1, GPIO.LOW)
+        GPIO.output(in2, GPIO.LOW)
+        pwm.ChangeDutyCycle(0.0)
+        self.get_logger().debug(f"{label} motor stopped (E‑STOP).")
 
-    def set_motor_rpm(self, in1_pin, in2_pin, pwm_instance, rpm):
-        """
-        Set motor speed and direction from an RPM command, converting to a PWM duty cycle.
-        """
-        limited_rpm = max(min(rpm, self.max_rpm), -self.max_rpm)
-
-        # Direction
-        if limited_rpm > 0:
-            GPIO.output(in1_pin, GPIO.HIGH)
-            GPIO.output(in2_pin, GPIO.LOW)
-        elif limited_rpm < 0:
-            GPIO.output(in1_pin, GPIO.LOW)
-            GPIO.output(in2_pin, GPIO.HIGH)
-        else:
-            GPIO.output(in1_pin, GPIO.LOW)
-            GPIO.output(in2_pin, GPIO.LOW)
-
-        # Convert RPM to duty cycle
-        duty_cycle = (abs(limited_rpm) / self.max_rpm) * self.max_pwm_duty_cycle
-        pwm_instance.ChangeDutyCycle(duty_cycle)
-
-        self.get_logger().info(
-            f"Requested RPM: {rpm:.2f}, Limited: {limited_rpm:.2f}, Duty Cycle: {duty_cycle:.2f}%"
-        )
-
-    def stop_motor(self, in1_pin, in2_pin, pwm_instance, side_label):
-        """
-        Force stop the motor by setting pins LOW and duty cycle to zero.
-        """
-        GPIO.output(in1_pin, GPIO.LOW)
-        GPIO.output(in2_pin, GPIO.LOW)
-        pwm_instance.ChangeDutyCycle(0.0)
-        self.get_logger().warn(f"Emergency stop: {side_label} motor forced to stop.")
-
-    def destroy(self):
-        """Clean up GPIO and stop PWM."""
-        self.get_logger().info("Shutting down Motor Controller Node.")
-        self.pwm_right.stop()
-        self.pwm_left.stop()
-        GPIO.output(self.STBY, GPIO.LOW)  # Disable motors
+    # ─────────────────── SHUTDOWN ─────────────────── #
+    def destroy(self) -> None:
+        self.get_logger().info("MotorController shutting down.")
+        self.pwm_r.stop()
+        self.pwm_l.stop()
+        GPIO.output(self.STBY, GPIO.LOW)
         GPIO.cleanup()
 
-def main(args=None):
+
+# ────────────────────────── MAIN ───────────────────────── #
+def main(args=None) -> None:
     rclpy.init(args=args)
     node = MotorController()
     try:
@@ -167,5 +156,5 @@ def main(args=None):
         rclpy.shutdown()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
