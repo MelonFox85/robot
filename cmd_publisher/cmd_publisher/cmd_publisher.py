@@ -8,7 +8,7 @@ class CmdPublisher(Node):
     def __init__(self):
         super().__init__('cmd_publisher')
         self.publisher_ = self.create_publisher(Float32MultiArray, 'cmd', 10)
-        self.timer = self.create_timer(1.0, self.timer_callback)  # Публикация каждую секунду
+        self.timer = self.create_timer(0.0025, self.timer_callback)  # Публикация каждую секунду
 
         # Переменные для интегралов
         self.integral_1 = 0.0
@@ -40,7 +40,7 @@ class CmdPublisher(Node):
 
         # Публикация сообщения
         self.publisher_.publish(msg)
-        self.get_logger().info(f'Published: {msg.data}')
+#        self.get_logger().info(f'Published: {msg.data}')
 
 
 def main(args=None):

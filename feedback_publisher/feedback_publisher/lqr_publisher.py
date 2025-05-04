@@ -17,7 +17,7 @@ class LQRPublisher(Node):
         super().__init__('lqr_publisher')
 
         # Rate at which we'll integrate and publish
-        self.declare_parameter('update_rate', 100.0)   # 100 Hz => 10 ms
+        self.declare_parameter('update_rate', 400.0)   # 100 Hz => 10 ms
         self.update_rate = float(self.get_parameter('update_rate').value)
         self.dt = 1.0 / self.update_rate
 

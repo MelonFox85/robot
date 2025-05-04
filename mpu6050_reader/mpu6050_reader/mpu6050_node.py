@@ -1,107 +1,110 @@
-import rclpy
-from rclpy.node import Node
-from smbus2 import SMBus
-from std_msgs.msg import Float32MultiArray
+#!/usr/bin/env python3
+"""
+ROS 2 node that reads MPU‑6050 at 1 kHz and publishes
+[ax, ay, az, gx, gy, gz]  (g / ° s‑1) in topic  /mpu6050/data.
+"""
+
+from __future__ import annotations
+
+import struct
 import time
 
-# I2C адрес MPU6050
-MPU6050_ADDR = 0x68
+import rclpy
+from rclpy.node import Node
+from rclpy.time import Time
+from std_msgs.msg import Float32MultiArray
+from smbus2 import SMBus
 
-# Ranges
-ACCEL_RANGE = 16384.0 #+-2g
-GYRO_RANGE = 131.0 #+-250/c
+# ---------------------------------------------------------------------#
+MPU6050_ADDR   = 0x68
+ACCEL_XOUT_H   = 0x3B
 
-# Регистры MPU6050
-PWR_MGMT_1 = 0x6B
-ACCEL_CONFIG = 0x1C
-GYRO_CONFIG = 0x1B
-ACCEL_XOUT_H = 0x3B
-ACCEL_YOUT_H = 0x3D
-ACCEL_ZOUT_H = 0x3F
-GYRO_XOUT_H = 0x43
-GYRO_YOUT_H = 0x45
-GYRO_ZOUT_H = 0x47
+PWR_MGMT_1     = 0x6B
+SMPLRT_DIV     = 0x19
+CONFIG         = 0x1A
+GYRO_CONFIG    = 0x1B
+ACCEL_CONFIG   = 0x1C
 
-def read_word(bus, address, reg):
-    """Чтение 16-битного значения из регистра устройства"""
-    high = bus.read_byte_data(address, reg)
-    low = bus.read_byte_data(address, reg + 1)
-    value = (high << 8) | low
-    if value >= 0x8000:  # Обработка отрицательных чисел
-        value = -((65535 - value) + 1)
-    return value
+ACCEL_SENS = 16384.0            # ±2 g  -> g/LSB
+GYRO_SENS  = 131.0              # ±250 °/s -> °/s / LSB
+# ---------------------------------------------------------------------#
+
 
 class MPU6050Node(Node):
-    def __init__(self):
-        super().__init__('mpu6050_node')
+    def __init__(self) -> None:
+        super().__init__("mpu6050_node_1khz")
 
-        # Подключение к I2C
-        self.get_logger().info('Initializing MPU6050...')
+        # I²C -------------------------------------------------------------
         self.bus = SMBus(1)
+        self._mpu_init()
 
-        # Инициализация MPU6050
+        # Publisher (QoS depth = 1 – только самое свежее)
+        self.pub = self.create_publisher(Float32MultiArray, "mpu6050/data", 1)
+
+        # «ручной» троттлинг лог‑сообщений
+        self.last_error_log: Time | None = None
+
+        # 1 kHz таймер
+        self.create_timer(0.001, self._read_and_publish)
+
+        self.get_logger().info("MPU6050 node started at 1 kHz.")
+
+    # ------------------------------------------------------------------
+    def _mpu_init(self) -> None:
+        """Конфигурация датчика под частоту 1 kHz."""
+        self.bus.write_byte_data(MPU6050_ADDR, PWR_MGMT_1, 0x00)   # wake‑up
+        time.sleep(0.05)
+
+        self.bus.write_byte_data(MPU6050_ADDR, CONFIG, 0x01)       # DLPF=184 Hz
+        self.bus.write_byte_data(MPU6050_ADDR, SMPLRT_DIV, 0x00)   # 1 kHz/(1+0)
+        self.bus.write_byte_data(MPU6050_ADDR, ACCEL_CONFIG, 0x00) # ±2 g
+        self.bus.write_byte_data(MPU6050_ADDR, GYRO_CONFIG, 0x00)  # ±250 °/s
+
+        self.get_logger().info("MPU6050 configured: Fs = 1 kHz, DLPF = 184 Hz.")
+
+    # ------------------------------------------------------------------
+    def _read_and_publish(self) -> None:
         try:
-            self.bus.write_byte_data(MPU6050_ADDR, PWR_MGMT_1, 0)
-            self.bus.write_byte_data(MPU6050_ADDR, GYRO_CONFIG, 0x00)
-            self.bus.write_byte_data(MPU6050_ADDR, ACCEL_CONFIG, 0x00)
-            self.get_logger().info('MPU6050 initialized')
-        except Exception as e:
-            self.get_logger().error(f'Failed to initialize MPU6050: {e}')
-            exit(1)
+            raw = self.bus.read_i2c_block_data(MPU6050_ADDR, ACCEL_XOUT_H, 14)
+            if len(raw) != 14:
+                raise IOError(f"expected 14 bytes, got {len(raw)}")
 
-        # Настройка таймера для публикации данных
-        self.publisher_ = self.create_publisher(Float32MultiArray, 'mpu6050/data', 10)
-        self.timer = self.create_timer(0.1, self.read_and_publish_data)  # 10 Г
-    def read_and_publish_data(self):
-        try:
-            # Чтение данных акселерометра
-            accel_x = read_word(self.bus, MPU6050_ADDR, ACCEL_XOUT_H) 
-            accel_y = read_word(self.bus, MPU6050_ADDR, ACCEL_YOUT_H) 
-            accel_z = read_word(self.bus, MPU6050_ADDR, ACCEL_ZOUT_H) 
+            ax, ay, az, _temp, gx, gy, gz = struct.unpack(">hhhhhhh", bytes(raw))
 
-            gyro_x = read_word(self.bus, MPU6050_ADDR, GYRO_XOUT_H) 
-            gyro_y = read_word(self.bus, MPU6050_ADDR, GYRO_YOUT_H)
-            gyro_z = read_word(self.bus, MPU6050_ADDR, GYRO_ZOUT_H)
-
-            # Normalization
-
-            accel_x /= ACCEL_RANGE
-            accel_y /= ACCEL_RANGE
-            accel_z /= ACCEL_RANGE
-            gyro_x /= GYRO_RANGE
-            gyro_y /= GYRO_RANGE
-            gyro_z /= GYRO_RANGE
-
-            # Calibration
-
-            accel_x += 0.0286328125
-            accel_y += 0.01318359375
-            accel_z += (1-0.933651123046875)
-            gyro_x += 2.7733206106870223
-            gyro_y += 0.8731297709923658
-            gyro_z += 1.020419847328245
-
-            # Подготовка и публикация сообщения
             msg = Float32MultiArray()
-            msg.data = [accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z]
-            self.publisher_.publish(msg)
+            msg.data = [
+                ax / ACCEL_SENS,
+                ay / ACCEL_SENS,
+                az / ACCEL_SENS,
+                gx / GYRO_SENS,
+                gy / GYRO_SENS,
+                gz / GYRO_SENS,
+            ]
+            self.pub.publish(msg)
 
-            self.get_logger().info(f'Accel Data -> X: {accel_x:.2f}, Y: {accel_y:.2f}, Z: {accel_z:.2f} ' f'Gyro Data -> X: {gyro_x:.2f}, Y: {gyro_y:.2f}, Z: {gyro_z:.2f} ')
-        except Exception as e:
-            self.get_logger().error(f'Failed to read data from MPU6050: {e}')
+        except Exception as exc:
+            # выводим предупреждение не чаще раза в 5 с
+            now = self.get_clock().now()
+            if self.last_error_log is None or \
+               (now - self.last_error_log).nanoseconds > 5e9:
+                self.get_logger().warn(f"I²C read error: {exc}")
+                self.last_error_log = now
 
-    def destroy_node(self):
-        self.bus.close()  # Закрываем I2C-шину перед завершением
+    # ------------------------------------------------------------------
+    def destroy_node(self) -> None:
+        self.bus.close()
         super().destroy_node()
 
 
-def main(args=None):
+def main(args=None) -> None:
     rclpy.init(args=args)
     node = MPU6050Node()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
     finally:
         node.destroy_node()
         rclpy.shutdown()
+
+
+if __name__ == "__main__":
+    main()

@@ -78,7 +78,7 @@ class LQRController(Node):
         d0, d1, d2, d3, d4, d5 = delta  # unpack for readability
 
         # --------- LQR equations (verbatim) --------------------------------
-        left_accel = -(
+        left_accel = (
             self.K1 * d0
             + self.K2 * d1
             + self.K3 * d2
@@ -87,7 +87,7 @@ class LQRController(Node):
             + self.K6 * d5
         )
 
-        right_accel = -(
+        right_accel = (
             self.K1 * d0
             + self.K2 * d1
             + self.K3 * d2
