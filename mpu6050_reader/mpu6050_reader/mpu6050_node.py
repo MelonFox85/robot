@@ -1,110 +1,91 @@
 #!/usr/bin/env python3
 """
-ROS 2 node that reads MPU‑6050 at 1 kHz and publishes
-[ax, ay, az, gx, gy, gz]  (g / ° s‑1) in topic  /mpu6050/data.
+MPU-6050 → /mpu6050/raw
+data = [ax_g, ay_g, az_g, gx_rad_s, gy_rad_s, gz_rad_s]
 """
 
 from __future__ import annotations
-
-import struct
-import time
-
+import struct, time, statistics, collections
 import rclpy
 from rclpy.node import Node
-from rclpy.time import Time
 from std_msgs.msg import Float32MultiArray
 from smbus2 import SMBus
 
-# ---------------------------------------------------------------------#
-MPU6050_ADDR   = 0x68
-ACCEL_XOUT_H   = 0x3B
+MPU, ACC_H = 0x68, 0x3B
+PWR_MGMT_1, SMPLRT_DIV, CONFIG, GYRO_CFG, ACC_CFG = 0x6B, 0x19, 0x1A, 0x1B, 0x1C
+ACC_SENS, G_SENS_DPS = 16384.0, 131.0
+DEG2RAD = 0.017453292519943295
 
-PWR_MGMT_1     = 0x6B
-SMPLRT_DIV     = 0x19
-CONFIG         = 0x1A
-GYRO_CONFIG    = 0x1B
-ACCEL_CONFIG   = 0x1C
-
-ACCEL_SENS = 16384.0            # ±2 g  -> g/LSB
-GYRO_SENS  = 131.0              # ±250 °/s -> °/s / LSB
-# ---------------------------------------------------------------------#
-
-
-class MPU6050Node(Node):
+class MPU6050(Node):
     def __init__(self) -> None:
-        super().__init__("mpu6050_node_1khz")
+        super().__init__("mpu6050_reader_node")
 
-        # I²C -------------------------------------------------------------
         self.bus = SMBus(1)
-        self._mpu_init()
+        self._init_chip()
 
-        # Publisher (QoS depth = 1 – только самое свежее)
-        self.pub = self.create_publisher(Float32MultiArray, "mpu6050/data", 1)
+        qos = rclpy.qos.QoSProfile(depth=20)
+        self.raw_pub = self.create_publisher(Float32MultiArray, "mpu6050/raw", qos)
 
-        # «ручной» троттлинг лог‑сообщений
-        self.last_error_log: Time | None = None
+        self.bias_buf = collections.deque(maxlen=400)
+        self.gyro_bias = [0.0, 0.0, 0.0]
 
-        # 1 kHz таймер
-        self.create_timer(0.001, self._read_and_publish)
+        self.create_timer(0.001, self._tick)  # 1 kHz
 
-        self.get_logger().info("MPU6050 node started at 1 kHz.")
+        self.get_logger().info("MPU-6050 node – 1 kHz, rad/s output.")
 
-    # ------------------------------------------------------------------
-    def _mpu_init(self) -> None:
-        """Конфигурация датчика под частоту 1 kHz."""
-        self.bus.write_byte_data(MPU6050_ADDR, PWR_MGMT_1, 0x00)   # wake‑up
+    # ---------------------------------------------------------------
+    def _init_chip(self) -> None:
+        self.bus.write_byte_data(MPU, PWR_MGMT_1, 0x00)
         time.sleep(0.05)
+        self.bus.write_byte_data(MPU, CONFIG, 0x01)
+        self.bus.write_byte_data(MPU, SMPLRT_DIV, 0x00)
+        self.bus.write_byte_data(MPU, ACC_CFG, 0x00)
+        self.bus.write_byte_data(MPU, GYRO_CFG, 0x00)
 
-        self.bus.write_byte_data(MPU6050_ADDR, CONFIG, 0x01)       # DLPF=184 Hz
-        self.bus.write_byte_data(MPU6050_ADDR, SMPLRT_DIV, 0x00)   # 1 kHz/(1+0)
-        self.bus.write_byte_data(MPU6050_ADDR, ACCEL_CONFIG, 0x00) # ±2 g
-        self.bus.write_byte_data(MPU6050_ADDR, GYRO_CONFIG, 0x00)  # ±250 °/s
+    # ---------------------------------------------------------------
+    def _tick(self) -> None:
+        raw = self.bus.read_i2c_block_data(MPU, ACC_H, 14)
+        ax, ay, az, _, gx, gy, gz = struct.unpack(">hhhhhhh", bytes(raw))
 
-        self.get_logger().info("MPU6050 configured: Fs = 1 kHz, DLPF = 184 Hz.")
+        gx_r, gy_r, gz_r = (v / G_SENS_DPS * DEG2RAD for v in (gx, gy, gz))
 
-    # ------------------------------------------------------------------
-    def _read_and_publish(self) -> None:
-        try:
-            raw = self.bus.read_i2c_block_data(MPU6050_ADDR, ACCEL_XOUT_H, 14)
-            if len(raw) != 14:
-                raise IOError(f"expected 14 bytes, got {len(raw)}")
+        if len(self.bias_buf) < self.bias_buf.maxlen:
+            self.bias_buf.append((gx_r, gy_r, gz_r))
+            if len(self.bias_buf) == self.bias_buf.maxlen:
+                self.gyro_bias = [statistics.mean(c[i] for c in self.bias_buf) for i in range(3)]
+                self.get_logger().info(f"Gyro bias = {self.gyro_bias}")
+            return
 
-            ax, ay, az, _temp, gx, gy, gz = struct.unpack(">hhhhhhh", bytes(raw))
+        gx_r -= self.gyro_bias[0]
+        gy_r -= self.gyro_bias[1]
+        gz_r -= self.gyro_bias[2]
 
-            msg = Float32MultiArray()
-            msg.data = [
-                ax / ACCEL_SENS,
-                ay / ACCEL_SENS,
-                az / ACCEL_SENS,
-                gx / GYRO_SENS,
-                gy / GYRO_SENS,
-                gz / GYRO_SENS,
-            ]
-            self.pub.publish(msg)
+        self.raw_pub.publish(
+            Float32MultiArray(
+                data=[
+                    ax / ACC_SENS,
+                    ay / ACC_SENS,
+                    az / ACC_SENS,
+                    gx_r,
+                    gy_r,
+                    gz_r,
+                ]
+            )
+        )
 
-        except Exception as exc:
-            # выводим предупреждение не чаще раза в 5 с
-            now = self.get_clock().now()
-            if self.last_error_log is None or \
-               (now - self.last_error_log).nanoseconds > 5e9:
-                self.get_logger().warn(f"I²C read error: {exc}")
-                self.last_error_log = now
-
-    # ------------------------------------------------------------------
-    def destroy_node(self) -> None:
+    # ---------------------------------------------------------------
+    def destroy_node(self):
         self.bus.close()
         super().destroy_node()
 
-
-def main(args=None) -> None:
-    rclpy.init(args=args)
-    node = MPU6050Node()
+def main():
+    rclpy.init()
+    node = MPU6050()
     try:
         rclpy.spin(node)
     finally:
         node.destroy_node()
         rclpy.shutdown()
-
 
 if __name__ == "__main__":
     main()

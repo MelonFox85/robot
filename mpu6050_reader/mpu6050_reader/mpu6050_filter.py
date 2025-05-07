@@ -1,92 +1,91 @@
 #!/usr/bin/env python3
 """
-ROS 2 node:
-    /mpu6050/data   (Float32MultiArray [ax ay az gx gy gz])  →  комплементарный фильтр → 
-    /mpu6050/filtered_data [tilt_deg, ω_body_y, ω_plane_z]
-
-•  Шаг интегрирования dt и коэффициент α подстраиваются к реальной частоте прихода
-   сообщений (рассчитываются из ROS‑меток времени).
-•  Постоянная времени τ определяет, насколько «инерционным» будет фильтр
-   (чем меньше τ, тем сильнее верим акселерометру).
+/mpu6050/raw → /mpu6050/filtered_data
+data = [ tilt_rad, gyro_y_rad_s, gyro_z_rad_s ]
 """
-
 from __future__ import annotations
-
 import math
-from typing import Optional
-
 import rclpy
 from rclpy.node import Node
-from rclpy.time import Time
 from std_msgs.msg import Float32MultiArray
 
 
-class MPU6050FilterNode(Node):
+class Complementary(Node):
     def __init__(self) -> None:
         super().__init__("mpu6050_filter")
 
-        # ────────── ROS I/O ───────────────────────────────────────────────
-        self.sub = self.create_subscription(
-            Float32MultiArray, "mpu6050/data", self.mpu_cb, 20
-        )
-        self.pub = self.create_publisher(
-            Float32MultiArray, "mpu6050/filtered_data", 20
-        )
-
-        # ────────── Параметры фильтра ─────────────────────────────────────
-        self.tau = 0.05           # [с] const time ≈ «склонность» к акселю (0.05 s → α≈0.83 при dt=0.01)
-        self.filtered_angle = 0.0
-        self.prev_stamp: Optional[Time] = None
-
-        self.get_logger().info(
-            f"Complementary filter ready (τ = {self.tau*1e3:.0f} ms)."
+        self.declare_parameters(
+            "",
+            [
+                ("tau", 0.02),          # с
+                ("gyro_clip", 30.0),    # rad/s
+                ("invert_acc_x", False),
+                ("invert_acc_y", False),
+                ("invert_acc_z", False),
+                ("invert_gyro_y", False),
+                ("invert_gyro_z", False),
+            ],
         )
 
-    # ────────────────────────────────────────────────────────────────────
-    def mpu_cb(self, msg: Float32MultiArray) -> None:
+        p = self.get_parameter
+        self.tau = float(p("tau").value)
+        self.clip = float(p("gyro_clip").value)
+
+        # флаги инверсии читаем один раз
+        self.inv_ax = bool(p("invert_acc_x").value)
+        self.inv_ay = bool(p("invert_acc_y").value)
+        self.inv_az = bool(p("invert_acc_z").value)
+        self.inv_gy = bool(p("invert_gyro_y").value)
+        self.inv_gz = bool(p("invert_gyro_z").value)
+
+        qos = rclpy.qos.QoSProfile(depth=20)
+        self.create_subscription(Float32MultiArray, "mpu6050/raw", self._cb, qos)
+        self.pub = self.create_publisher(Float32MultiArray, "mpu6050/filtered_data", qos)
+
+        self.angle = 0.0
+        self.prev_ns: int | None = None
+
+        self.get_logger().info(f"Complementary filter τ = {self.tau*1e3:.0f} ms")
+
+    # -----------------------------------------------------------------
+    def _cb(self, msg: Float32MultiArray) -> None:
         if len(msg.data) < 6:
-            self.get_logger().error("mpu6050/data must contain 6 floats.")
             return
 
-        ax, ay, az, gx_deg, gy_deg, gz_deg = msg.data[:6]
+        ax, ay, az, gx, gy, gz = msg.data[:6]
 
-        # 1. dt из ROS‑меток
-        now = self.get_clock().now()
-        if self.prev_stamp is None:          # первый пакет — нечего сравнивать
-            self.prev_stamp = now
+        # apply sign conventions
+        if self.inv_ax: ax = -ax
+        if self.inv_ay: ay = -ay
+        if self.inv_az: az = -az
+        if self.inv_gy: gy = -gy
+        if self.inv_gz: gz = -gz
+
+        # dt from publisher (ns) or local clock
+        now_ns = msg.layout.data_offset or self.get_clock().now().nanoseconds
+        if self.prev_ns is None:
+            self.prev_ns = now_ns
             return
-        dt = (now - self.prev_stamp).nanoseconds * 1e-9
-        self.prev_stamp = now
+        dt = (now_ns - self.prev_ns) * 1e-9
+        self.prev_ns = now_ns
         if dt <= 0.0:
-            return                           # защита от некорректных меток
+            return
 
-        # 2. α = τ / (τ + dt)  — классическая формула комплементарного фильтра
+        # complementary filter
         alpha = self.tau / (self.tau + dt)
+        accel_ang = math.atan2(ax, math.sqrt(ay * ay + az * az))
+        gyro_ang  = self.angle + gy * dt
+        self.angle = alpha * gyro_ang + (1.0 - alpha) * accel_ang
 
-        # 3. Угол по акселерометру
-        accel_angle = math.degrees(
-            math.atan2(ax, math.sqrt(ay * ay + az * az))
-        )
+        gy = max(min(gy, self.clip), -self.clip)
+        gz = max(min(gz, self.clip), -self.clip)
 
-        # 4. Угол по гироскопу (интеграл)
-        gyro_angle = self.filtered_angle + gy_deg * dt
-
-        # 5. Комплементарное объединение
-        self.filtered_angle = alpha * gyro_angle + (1.0 - alpha) * accel_angle
-
-        # 6. Выходные величины
-        out = Float32MultiArray()
-        out.data = [
-            self.filtered_angle,  # наклон (pitch) в °   — δ2 для LQR
-            gy_deg,               # ω_y тела             — δ3
-            gz_deg,               # ω_z плоскости        — δ5
-        ]
-        self.pub.publish(out)
+        self.pub.publish(Float32MultiArray(data=[self.angle, gy, gz]))
 
 
-def main(args=None):
-    rclpy.init(args=args)
-    node = MPU6050FilterNode()
+def main() -> None:
+    rclpy.init()
+    node = Complementary()
     try:
         rclpy.spin(node)
     finally:

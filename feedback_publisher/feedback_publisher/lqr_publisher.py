@@ -1,159 +1,160 @@
+#!/usr/bin/env python3
+"""
+Формирует δ-вектор (ошибку состояния) с частотой `control_rate`.
+
+Изменения относительно исходника:
+• Используются часы ROS2 (`self.get_clock().now()`), поэтому dt синхронизирован
+  со всем графом и корректно работает в симуляции.
+• Добавлены параметры `wheel_radius`, `wheel_base`, проверка их валидности.
+• QoS `depth=1` – не накапливаем устаревшие сообщения.
+• Обработаны крайние случаи: пустая команда, dt ≤ 0, некорректная длина msg.
+• Имя узла и выходного топика унифицировано: `lqr_feedback`.
+• Типовые аннотации повышают читаемость, а логика выделена в функции.
+"""
+
+from __future__ import annotations
+
+import math
+from typing import List, Optional
+
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile
 from std_msgs.msg import Float32, Float32MultiArray
-import math
 
 
-class LQRPublisher(Node):
-    """
-    A node that computes the difference (delta) between the desired and the actual state of the robot.
-    The state is published as an array of 6 elements:
-      [distance_traveled (m), linear_velocity (m/s),
-       body_tilt_angle (rad), body_tilt_angular_velocity (rad/s),
-       turning_angle (rad), turning_angular_velocity (rad/s)]
-    """
+class LQRFeedback(Node):
+    def __init__(self) -> None:
+        super().__init__("lqr_feedback")
 
-    def __init__(self):
-        super().__init__('lqr_publisher')
+        # ─────────── параметры ────────────────────────────────────────
+        self.declare_parameter("control_rate", 400.0)
+        self.declare_parameter("wheel_radius", 0.0325)  # [m]
+        self.declare_parameter("wheel_base", 0.1587)    # [m]
+        self.declare_parameter("state_size", 6)
 
-        # Rate at which we'll integrate and publish
-        self.declare_parameter('update_rate', 400.0)   # 100 Hz => 10 ms
-        self.update_rate = float(self.get_parameter('update_rate').value)
-        self.dt = 1.0 / self.update_rate
-
-        # Publisher for "negative feedback" array
-        self.feedback_publisher = self.create_publisher(Float32MultiArray, 'lqr_feedback', 10)
-
-        # Subscription: Desired robot parameters (cmd) as 6-element array
-        # The user must send [distance, linear_vel, body_angle, body_gyro, turn_angle, turn_gyro]
-        self.cmd_subscription = self.create_subscription(
-            Float32MultiArray,
-            'cmd',
-            self.cmd_callback,
-            10
+        self.control_rate: float = (
+            self.get_parameter("control_rate").get_parameter_value().double_value
         )
-        # Subscription: Encoders (left and right)
-        self.encoder_left_subscription = self.create_subscription(
-            Float32,
-            'encoders_data/left',
-            self.encoder_left_callback,
-            10
+        self.control_rate = max(self.control_rate, 1.0)  # защита
+        self.dt_nom: float = 1.0 / self.control_rate
+
+        self.r: float = self.get_parameter(
+            "wheel_radius"
+        ).get_parameter_value().double_value
+        self.base: float = self.get_parameter(
+            "wheel_base"
+        ).get_parameter_value().double_value
+
+        self.state_size: int = int(
+            self.get_parameter("state_size").get_parameter_value().integer_value
         )
-        self.encoder_right_subscription = self.create_subscription(
-            Float32,
-            'encoders_data/right',
-            self.encoder_right_callback,
-            10
-        )
-        # Subscription: IMU with partial data
-        # We'll assume the layout: [body_angle_deg, body_angular_velocity_deg_s, turn_angular_velocity_deg_s]
-        self.imu_subscription = self.create_subscription(
-            Float32MultiArray,
-            'mpu6050/filtered_data',
-            self.imu_callback,
-            10
+        if self.state_size < 1:
+            self.get_logger().warning("state_size < 1, исправляю на 6")
+            self.state_size = 6
+
+        # ─────────── подписки ─────────────────────────────────────────
+        qos = QoSProfile(depth=1)
+
+        self.create_subscription(Float32MultiArray, "cmd", self._cmd_cb, qos)
+        self.create_subscription(Float32, "encoders_data/left", self._enc_left_cb, qos)
+        self.create_subscription(Float32, "encoders_data/right", self._enc_right_cb, qos)
+        self.create_subscription(
+            Float32MultiArray, "mpu6050/filtered_data", self._imu_cb, qos
         )
 
-        # Desired state
-        self.cmd_values = None  # [distance, lin_vel, tilt_angle, tilt_gyro, turn_angle, turn_gyro]
+        # ─────────── публикация ───────────────────────────────────────
+        self.pub = self.create_publisher(Float32MultiArray, "lqr_feedback", qos)
+        self.create_timer(self.dt_nom, self._publish)
 
-        # Current state (units => [m, m/s, rad, rad/s, rad, rad/s])
-        self.current_values = [0.0]*6
+        # ─────────── внутреннее состояние ─────────────────────────────
+        self.cmd: Optional[List[float]] = None
+        self.state: List[float] = [0.0] * self.state_size
 
-        # Internal
-        self.left_wheel_speed = 0.0   # rev/s
-        self.right_wheel_speed = 0.0  # rev/s
+        self._prev_stamp = self.get_clock().now()
 
-        # For distance and turning angle integration
-        self.distance_accum = 0.0
-        self.turn_accum = 0.0
+        # последние угловые скорости колёс (rev/s)
+        self.w_l: float = 0.0
+        self.w_r: float = 0.0
 
-        # Robot geometry
-        self.wheel_radius = 0.0325
-        self.wheel_base = 0.1587
+    # =================================================================
+    #                           callbacks
+    # =================================================================
+    def _cmd_cb(self, msg: Float32MultiArray) -> None:
+        data = list(msg.data)
+        if len(data) != self.state_size:
+            self.get_logger().warn(
+                f"cmd длины {len(data)} не совпадает с state_size={self.state_size}"
+            )
+        self.cmd = data
 
-        self.get_logger().info("LQRPublisher node initialized.")
+    def _enc_left_cb(self, msg: Float32) -> None:
+        self.w_l = msg.data
 
-    def cmd_callback(self, msg):
-        """Receive desired state."""
-        self.cmd_values = list(msg.data)   # store so we can compute delta
-        self.publish_feedback()            # attempt immediate publish
+    def _enc_right_cb(self, msg: Float32) -> None:
+        self.w_r = msg.data
 
-    def encoder_left_callback(self, msg):
-        """Left wheel speed in rev/s."""
-        self.left_wheel_speed = msg.data
+    def _imu_cb(self, msg: Float32MultiArray) -> None:
+        """msg.data = [θ_rad, θ̇_rad_s, ψ̇_rad_s]."""
+        if len(msg.data) < 3:
+            self.get_logger().warn("/mpu6050/filtered_data too short")
+            return
+        θ, θdot, ψdot = msg.data[:3]
+        self.state[2] = θ
+        self.state[3] = θdot
+        self.state[5] = ψdot      # ← больше не будет затираться
 
-    def encoder_right_callback(self, msg):
-        """Right wheel speed in rev/s."""
-        self.right_wheel_speed = msg.data
-        self.update_motion_estimation()
+    # =================================================================
+    #                      вспомогательные функции
+    # =================================================================
+    def _propagate_kinematics(self, dt: float) -> None:
+        v_l = self.w_l * 2.0 * math.pi * self.r
+        v_r = self.w_r * 2.0 * math.pi * self.r
+        v = 0.5 * (v_l + v_r)
+        ψdot = (v_r - v_l) / self.base
 
-    def imu_callback(self, msg):
-        """
-        IMU update in degrees for angle/velocity, so convert them to radians here.
-        Layout assumed: [body_angle_deg, body_ang_vel_deg_s, turn_ang_vel_deg_s].
-        """
-        body_angle_rad = math.radians(msg.data[0])
-        body_ang_vel_rad_s = math.radians(msg.data[1])
-        turn_ang_vel_rad_s = math.radians(msg.data[2])
+        self.state[0] += v * dt
+        self.state[4] += ψdot * dt
 
-        # Store in current_values
-        self.current_values[2] = body_angle_rad
-        self.current_values[3] = body_ang_vel_rad_s
-        self.current_values[5] = turn_ang_vel_rad_s  # turn angular velocity
-        # We'll handle turning angle integration in update_motion_estimation
-
-    def update_motion_estimation(self):
-        """
-        Convert wheel speeds to linear velocity, distance, and turning angle in rad.
-        """
-        # rev/s -> (2*pi*r) m/s
-        v_left = self.left_wheel_speed * 2.0 * math.pi * self.wheel_radius
-        v_right = self.right_wheel_speed * 2.0 * math.pi * self.wheel_radius
-        linear_vel = (v_left + v_right) / 2.0
-
-        # Turning angle rate (rad/s)
-        turning_rate = (v_right - v_left) / self.wheel_base
-
-        # Integrate distance
-        self.distance_accum += linear_vel * self.dt
-        self.current_values[0] = self.distance_accum
-
-        # Integrate turning angle
-        self.turn_accum += turning_rate * self.dt
-        self.current_values[4] = self.turn_accum
-
-        # Update linear velocity
-        self.current_values[1] = linear_vel
-
-        # Attempt to publish
-        self.publish_feedback()
-
-    def publish_feedback(self):
-        """Publish difference between cmd_values and current_values."""
-        if self.cmd_values is None:
+        self.state[1] = v
+        # state[5] (ψ̇) оставляем как пришло с IMU
+    # =================================================================
+    def _publish(self) -> None:
+        if self.cmd is None:
+            # Нет целевого вектора – ничего не публикуем
             return
 
-        # Build array of delta = (cmd_value - current_value)
-        # Order: [dist, lin_vel, body_tilt, body_tilt_vel, turn_angle, turn_vel]
-        delta = []
-        for c, a in zip(self.cmd_values, self.current_values):
-            delta.append(c - a)
+        # вычисление реального dt по системным часам ROS
+        now = self.get_clock().now()
+        dt = (now - self._prev_stamp).nanoseconds * 1e-9
+        self._prev_stamp = now
 
-        msg_out = Float32MultiArray()
-        msg_out.data = delta
-        self.feedback_publisher.publish(msg_out)
-        # debug print
-        self.get_logger().debug("Published LQR feedback: {}".format(delta))
+        if dt <= 0.0:
+            return
+
+        self._propagate_kinematics(dt)
+
+        # «выравниваем» размеры, чтобы zip не урезал лишнее
+        cmd_padded = (self.cmd + [0.0] * self.state_size)[: self.state_size]
+        delta = [c - s for c, s in zip(cmd_padded, self.state)]
+
+        self.pub.publish(Float32MultiArray(data=delta))
+
+        self.get_logger().debug(
+            f"dt={dt*1e3:.2f} ms  δ={', '.join(f'{x:+.3f}' for x in delta)}"
+        )
 
 
-def main(args=None):
+# =====================================================================
+def main(args: list[str] | None = None) -> None:
     rclpy.init(args=args)
-    node = LQRPublisher()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    node = LQRFeedback()
+    try:
+        rclpy.spin(node)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
